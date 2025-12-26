@@ -40,6 +40,12 @@ from ppocr.modeling.architectures import apply_to_static
 import tools.program as program
 import tools.naive_sync_bn as naive_sync_bn
 
+## ML FLOW ##
+import mlflow
+
+mlflow.set_experiment("paddle-ocr-train")
+#############
+
 dist.get_world_size()
 
 
@@ -266,8 +272,15 @@ def test_reader(config, device, logger):
 
 
 if __name__ == "__main__":
+    mlflow.start_run()
+
     config, device, logger, vdl_writer = program.preprocess(is_train=True)
+
+    mlflow.log_params(config)
+
     seed = config["Global"]["seed"] if "seed" in config["Global"] else 1024
     set_seed(seed)
     main(config, device, logger, vdl_writer, seed)
     # test_reader(config, device, logger)
+
+    mlflow.end_run()

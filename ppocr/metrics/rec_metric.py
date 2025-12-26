@@ -12,12 +12,53 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import pandas as pd
+import mlflow
 from rapidfuzz.distance import Levenshtein
 from difflib import SequenceMatcher
 
 import numpy as np
 import string
 from .bleu import compute_bleu_score, compute_edit_distance
+
+
+def normalize_arabic_to_persian(text: str) -> str:
+    """
+    Normalize Arabic text to Persian (Farsi) standard.
+    Converts Kaf, Yeh, Digits, and removes diacritics.
+    """
+    if not text:
+        return ""
+
+    # Using a translation table for O(n) performance
+    translation_table = str.maketrans({
+        "ك": "ک",  # Arabic Kaf to Persian
+        "ي": "ی",  # Arabic Yeh (with dots) to Persian
+        "ى": "ی",  # Alif Maksura to Persian Yeh
+        "ة": "ه",  # Teh Marbuta to Heh
+        "أ": "ا",  # Alef with Hamza Above to Alef
+        "إ": "ا",  # Alef with Hamza Below to Alef
+        "آ": "ا",  # Alef with Madda to Alef
+        "ٱ": "ا",  # Alef Wasla to Alef
+        "ؤ": "و",  # Waw with Hamza to Waw
+        "ئ": "ی",  # Yeh with Hamza to Persian Yeh
+
+        # Arabic Digits
+        "٠": "۰", 
+        "١": "۱", 
+        "٢": "۲", 
+        "٣": "۳", 
+        "٤": "۴",
+        "٥": "۵", 
+        "٦": "۶", 
+        "٧": "۷", 
+        "٨": "۸", 
+        "٩": "۹",
+    })
+    
+    text = text.strip().translate(translation_table)
+
+    return text
 
 
 class RecMetric(object):
@@ -38,45 +79,139 @@ class RecMetric(object):
 
     def __call__(self, pred_label, *args, **kwargs):
         preds, labels = pred_label
+
         correct_num = 0
         all_num = 0
+
         norm_edit_dis = 0.0
+        char_edit_dist = 0
+        char_len = 0
+
+        char_edit_dist_ic = 0
+        char_edit_dist_ichar = 0
+
+        word_edit_dist = 0
+        word_len = 0
+
+        conf_sum = 0.0
+
         for (pred, pred_conf), (target, _) in zip(preds, labels):
             if self.ignore_space:
                 pred = pred.replace(" ", "")
                 target = target.replace(" ", "")
+
             if self.is_filter:
                 pred = self._normalize_text(pred)
                 target = self._normalize_text(target)
-            norm_edit_dis += Levenshtein.normalized_distance(pred, target)
+
+            # Line-level
             if pred == target:
                 correct_num += 1
             all_num += 1
+
+            # Normalized edit distance (line)
+            norm_edit_dis += Levenshtein.normalized_distance(pred, target)
+
+            # Character-level (CER)
+            char_edit_dist += Levenshtein.distance(pred, target)
+            char_len += len(target)
+
+            # Character-level insensitive case (CER)
+            char_edit_dist_ic += Levenshtein.distance(
+                pred.lower(), target.lower()
+            )
+
+            # Character-level insensitive characters (CER)
+            char_edit_dist_ichar += Levenshtein.distance(
+                normalize_arabic_to_persian(pred.lower()), 
+                normalize_arabic_to_persian(target.lower())
+            )
+
+            # Word-level (WER)
+            pred_words = pred.split()
+            target_words = target.split()
+            word_edit_dist += Levenshtein.distance(pred_words, target_words)
+            word_len += len(target_words)
+
+            # Confidence (optional)
+            conf_sum += float(pred_conf)
+
         self.correct_num += correct_num
         self.all_num += all_num
+        self.char_len += char_len
+        self.word_len += word_len
+        self.conf_sum += conf_sum
         self.norm_edit_dis += norm_edit_dis
+        self.char_edit_dist += char_edit_dist
+        self.char_edit_dist_ic += char_edit_dist_ic
+        self.char_edit_dist_ichar += char_edit_dist_ichar
+        self.word_edit_dist += word_edit_dist
+        self.list_of_pairs.append((preds[0][0], labels[0][0]))
+
+        cer = char_edit_dist / (char_len + self.eps)
+        wer = word_edit_dist / (word_len + self.eps)
+        cer_ic = char_edit_dist_ic / (char_len + self.eps)
+        cer_ichar = char_edit_dist_ichar / (char_len + self.eps)
+
         return {
             "acc": correct_num / (all_num + self.eps),
             "norm_edit_dis": 1 - norm_edit_dis / (all_num + self.eps),
+            "cer": cer,
+            "wer": wer,
+            "cer_icase": cer_ic,
+            "cer_ichar": cer_ichar,
+            "avg_conf": conf_sum / (all_num + self.eps),
         }
 
-    def get_metric(self):
+    def get_metric(self, step=None):
         """
         return metrics {
                  'acc': 0,
                  'norm_edit_dis': 0,
             }
         """
+        if step is not None:
+            rows = []
+            for pred, label in self.list_of_pairs:
+                rows.append({
+                    "step": step,
+                    "pred": pred,
+                    "label": label,
+                })
+
+            df = pd.DataFrame(rows)
+            mlflow.log_table(df, f"evaluation/preds_labels.json")
+
         acc = 1.0 * self.correct_num / (self.all_num + self.eps)
         norm_edit_dis = 1 - self.norm_edit_dis / (self.all_num + self.eps)
+        cer = self.char_edit_dist / (self.char_len + self.eps)
+        wer = self.word_edit_dist / (self.word_len + self.eps)
+        cer_ic = self.char_edit_dist_ic / (self.char_len + self.eps)
+        cer_ichar = self.char_edit_dist_ichar / (self.char_len + self.eps)
+        avg_conf = self.conf_sum / (self.all_num + self.eps)
         self.reset()
-        return {"acc": acc, "norm_edit_dis": norm_edit_dis}
+        return {
+            "acc": acc, 
+            "cer": cer,
+            "wer": wer,
+            "cer_icase": cer_ic,
+            "cer_ichar": cer_ichar,
+            "norm_edit_dis": norm_edit_dis,
+            "avg_conf": avg_conf,
+        }
 
     def reset(self):
         self.correct_num = 0
         self.all_num = 0
         self.norm_edit_dis = 0
-
+        self.char_edit_dist = 0
+        self.char_edit_dist_ic = 0
+        self.char_edit_dist_ichar = 0
+        self.word_edit_dist = 0
+        self.word_len = 0
+        self.char_len = 0
+        self.conf_sum = 0
+        self.list_of_pairs = []
 
 class CNTMetric(object):
     def __init__(self, main_indicator="acc", **kwargs):

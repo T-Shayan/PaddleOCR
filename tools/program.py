@@ -20,6 +20,7 @@ import os
 import gc
 import sys
 import platform
+import mlflow
 import yaml
 import time
 import datetime
@@ -456,6 +457,24 @@ def train(
             stats["lr"] = lr
             train_stats.update(stats)
 
+            mlflow.log_metrics(
+                {
+                    "lr": train_stats.get()['lr'],
+                    "train_accuracy": train_stats.get()['acc'],
+                    "train_norm_edit_dis": train_stats.get()['norm_edit_dis'],
+                    "train_cer": train_stats.get()['cer'],
+                    "train_wer": train_stats.get()['wer'],
+                    "train_cer_icase": train_stats.get()['cer_icase'],
+                    "train_cer_ichar": train_stats.get()['cer_ichar'],
+                    "train_CTCLoss": train_stats.get()['CTCLoss'],
+                    "train_NRTRLoss ": train_stats.get()['NRTRLoss'],
+                    "train_loss": train_stats.get()['loss'],
+                    "step": global_step,
+                    "epoch": epoch,
+                },
+                step=global_step,
+            )
+
             if log_writer is not None and dist.get_rank() == 0:
                 log_writer.log_metrics(
                     metrics=train_stats.get(), prefix="TRAIN", step=global_step
@@ -523,6 +542,7 @@ def train(
                     amp_custom_black_list=amp_custom_black_list,
                     amp_custom_white_list=amp_custom_white_list,
                     amp_dtype=amp_dtype,
+                    global_step=global_step,
                 )
                 cur_metric_str = "cur metric, {}".format(
                     ", ".join(["{}: {}".format(k, v) for k, v in cur_metric.items()])
@@ -670,6 +690,7 @@ def eval(
     amp_custom_black_list=[],
     amp_custom_white_list=[],
     amp_dtype="float16",
+    global_step=None,
 ):
     model.eval()
     with paddle.no_grad():
@@ -758,7 +779,20 @@ def eval(
             total_frame += len(images)
             sum_images += 1
         # Get final metric，eg. acc or hmean
-        metric = eval_class.get_metric()
+        metric = eval_class.get_metric(global_step)
+
+        mlflow.log_metrics(
+            {
+                "eval_accuracy": metric['acc'],
+                "eval_norm_edit_dis": metric['norm_edit_dis'],
+                "eval_cer": metric['cer'],
+                "eval_wer": metric['wer'],
+                "eval_cer_icase": metric['cer_icase'],
+                "eval_cer_ichar": metric['cer_ichar'],
+            },
+            step=global_step,
+        )
+
 
     pbar.close()
     model.train()
